@@ -6,16 +6,17 @@ import worker.WorkerNode
 
 object ClientApp {
     def main(args: Array[String]): Unit = {
-        if (args.length < 3) {
-            println("Usage: ClientApp <masterPort> <dataFile> <numWorkers>")
+        if (args.length < 4) {
+            println("Usage: ClientApp <masterPort> <dataFile> <numWorkers> <outputFile>")
             System.exit(1)
         }
 
         val masterPort = args(0).toInt
         val dataFile = args(1)
         val numWorkers = args(2).toInt
+        val outputFile = args(3)
 
-        val protocol = new DefaultProtocol()
+        val protocol = new CompressionProtocol()
 
         // start master node
         val master = new MasterNode(masterPort, protocol)
@@ -27,16 +28,19 @@ object ClientApp {
         }
 
         // Read data and split into tasks
+        val chunkSize = 1000 // Nombre de ligne par bloc
         val data = scala.io.Source.fromFile(dataFile).mkString
-         val tasks = data.grouped(data.length / numWorkers).map(WordCountTask).toSeq
+        val tasks = data.grouped(data.length / chunkSize).map(lines => WordCountTask(lines.mkString("\n"))).toSeq
 
-
+        Thread.sleep(2000)
         // Distribute tasks
         master.distributeTasks(tasks)
+        println("Task distributed")
 
         // Collect results
         Thread.sleep(5000)
-        val result = master.collectResults()
-        result.foreach(r => println(r.formatted))
+        var globalCounts = master.collectResults()
+        master.saveResultsToFile(outputFile, globalCounts)
+
     }
 }
