@@ -3,6 +3,7 @@ package core
 import java.net.Socket
 import java.util.zip.{GZIPInputStream, GZIPOutputStream}
 import java.io.{ByteArrayInputStream, ByteArrayOutputStream}
+import java.net.SocketException
 
 class CompressionProtocol extends CommunicationProtocol {
     private def compress(data: String): Array[Byte] = {
@@ -20,6 +21,9 @@ class CompressionProtocol extends CommunicationProtocol {
     }
 
     def send(socket: Socket, message: String): Unit = {
+        if (socket.isClosed || !socket.isConnected ){
+            throw new SocketException("Tentative d'envoie sur un socket fermé ou non connecté")
+        }
         val out = socket.getOutputStream
         val compressedData = compress(message + "\nEND")
         out.write(compressedData)

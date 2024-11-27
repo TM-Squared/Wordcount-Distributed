@@ -5,77 +5,69 @@ import java.net.{ServerSocket, Socket}
 import scala.collection.mutable
 import scala.collection.concurrent.TrieMap
 import java.io.PrintWriter
+import java.net.InetSocketAddress
 
 class MasterNode(port: Int, protocol: CommunicationProtocol) extends Node {
-    private val workers = mutable.ListBuffer[Socket]()
-    private val results = mutable.ListBuffer[Result]()
+    private val workerManager = new WorkerManager()
+    private val taskDistributor = new TaskDistributor(protocol, workerManager)
+    private val resultCollector = new ResultCollector(protocol, workerManager)
+    private var serverSocket: Option[ServerSocket] = None
+    private var running: Boolean = true
 
     override def start(): Unit = {
-        val serverSocket = new ServerSocket(port)
-        println(s"MasterNode started on port $port")
+        try {
+            serverSocket = Some(new ServerSocket())
+            serverSocket.get.setReuseAddress(true)
+            serverSocket.get.bind(new InetSocketAddress(port))
+            println(s"MasterNode démarré sur le port $port")
 
-        new Thread(() => {
-            while (true){
-                val worker = serverSocket.accept()
-                workers += worker
-            }
-        }).start()
+            new Thread(() => {
+                while (running && serverSocket.exists(!_.isClosed)){
+                    try {
+                        val worker = serverSocket.get.accept()
+                        workerManager.addWorker(worker)
+                        println(s"Worker connecté: ${worker.getInetAddress}")
+                    } catch {
+                        case e: Exception =>
+                            if (running)  {
+                                println(s"Erreur lors de l'acceptation d'un Worker : ${e.getMessage}")
+                            } else {
+                                println("ServerSocket fermé proprement, arrêt du thread d'écoute.")
+                            }
+                    }
+                }
+            }).start()
+        } catch {
+            case e:Exception => 
+                println(s"Erreur lors du démarrage du MasterNode : ${e.getMessage}")
+        }
+
     }
 
-    def distributeTasks(tasks: Seq[Task]): Unit = {
-        workers.zip(tasks).foreach{ case (worker, task) => 
-            protocol.send(worker, task.data)     
-        }
+    def distributeTasks(tasks:Seq[Task]): Unit = {
+        taskDistributor.addTasks(tasks)
     }
 
     def collectResults(): Map[String, Int] = {
-        val globalCounts = TrieMap[String, Int]()
+        resultCollector.collectResults()
+    }
 
-        workers.foreach { socket =>
-            val resultData = protocol.receive(socket)
-            println(s"Données reçues du Worker : $resultData")
-            val result = parseResult(resultData)
 
-            result match {
-                case WordCountResult(counts) =>
-                    counts.foreach { case (word, count) =>
-                        globalCounts.updateWith(word) {
-                            case Some(existingCount) => Some(existingCount + count)
-                            case None => Some(count)
-                        }
-                    }
-            }
+    def sendStopSignal(): Unit = {
+        println("Envoie du signal d'arrêt à tous les workers...")
+        workerManager.allWorkers().foreach { worker => 
+            if (!worker.isClosed) {
+                try {
+                    protocol.send(worker, "stop")
+                    println(s"Signal d'arrêt envoyé au Worker : ${worker.getInetAddress}")
+                } catch {
+                    case e: Exception =>
+                        println(s"Erreur lors de l'envoi du signal d'arrêt au Worker : ${e.getMessage}")
+                }
+            }    
         }
-
-        globalCounts.toMap 
+        Thread.sleep(4000)
     }
-
-
-    private def parseResult(data: String): Result = {
-        val counts = data.split(",").flatMap { pair =>
-            val parts = pair.split(":")
-            if (parts.length == 2) {
-                val word = parts(0).trim
-                val count = parts(1).trim.toIntOption
-                count.map(c => word -> c) // Retourne un Some((word, count)) si valide
-            } else {
-                println(s"Format incorrect ignoré : $pair")
-                None // Ignore les paires mal formatées
-            }
-        }.toMap
-
-        WordCountResult(counts)
-    }
-
-    def displayResults(globalCounts: Map[String, Int]): Unit = {
-        println("Résultat global du WordCount :")
-        globalCounts.foreach { case (word, count) =>
-            println(s"$word: $count")
-        }
-    }
-
-
-
     
 
     def saveResultsToFile(outputPath: String, globalCounts: Map[String, Int]): Unit = {
@@ -92,5 +84,28 @@ class MasterNode(port: Int, protocol: CommunicationProtocol) extends Node {
     }
 
 
-    override def stop(): Unit = workers.foreach(_.close())
+    override def stop(): Unit = {
+        println("Arrêt du MasterNode")
+
+        running = false
+        workerManager.allWorkers().foreach { worker => 
+            try {
+                if (!worker.isClosed) worker.close()
+                println(s"Connexion fermée pour le Worker : ${worker.getInetAddress}")
+            } catch {
+                case e:Exception => println(s"Erreur lors de la fermeture du serverSocket: ${e.getMessage}")
+            }
+        }
+
+        serverSocket.foreach { server =>
+            try {
+                server.close()
+                println("ServerSocket fermé.")
+            } catch {
+                case e: Exception =>
+                    println(s"Erreur lors de la fermeture du ServerSocket : ${e.getMessage}")
+            }
+        }
+        println("MasterNode arrêté.")
+    }
 }
